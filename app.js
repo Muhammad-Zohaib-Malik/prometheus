@@ -1,16 +1,55 @@
 import express from "express";
-import fs from "fs";
-import promClient from 'prom-client'
+import fs from "fs/promises";
+import promClient from "prom-client";
 
 const app = express();
 const PORT = 4000;
+
+const httpRequestTotal = new promClient.Counter({
+  name: "http_requests_total",
+  help: "Total http request count",
+  labelNames: ["method", "path", "status"],
+});
+
+const httpReqInFlight = new promClient.Gauge({
+  name: "http_requests_in_flight",
+  help: "Total http requests that are being processed currently",
+  labelNames: ["method", "path"],
+});
+
+const httpReqDuration = new promClient.Histogram({
+  name: "http_request_duration_seconds",
+  help: "HTTP request duration in seconds",
+  buckets: [0.1, 0.25, 0.5, 1, 2, 5],
+  labelNames: ["method", "path", "status"],
+});
+
 promClient.collectDefaultMetrics();
 
-app.get('/metrics', async (req, res) => {
-  const metrics = await promClient.register.metrics()
-  res.set('Content-Type', promClient.register.contentType)
-  res.end(metrics)
-})
+app.use((req, res, next) => {
+  if (req.path === "/metrics") return next();
+  const { method, path } = req;
+  httpReqInFlight.labels(method, path).inc();
+  const endTimer = httpReqDuration.startTimer({ method, path });
+
+  res.on("finish", () => {
+    httpReqInFlight.labels(method, path).dec();
+    httpRequestTotal.labels(method, path, res.statusCode).inc();
+    endTimer({ status: res.statusCode });
+  });
+
+  req.on("aborted", () => {
+    httpReqInFlight.labels(method, path).dec();
+  });
+
+  next();
+});
+
+app.get("/metrics", async (req, res) => {
+  const metrics = await promClient.register.metrics();
+  res.set("Content-Type", promClient.register.contentType);
+  res.end(metrics);
+});
 
 app.get("/", (req, res) => {
   res.json({
@@ -19,7 +58,7 @@ app.get("/", (req, res) => {
 });
 
 app.get("/unstable", async (req, res) => {
-  const delays = [500, 1000, 2000];
+  const delays = [500, 1000, 1500];
   const delay = delays[Math.floor(Math.random() * delays.length)];
 
   const shouldFail = Math.random() < 0.4;
@@ -60,11 +99,11 @@ app.get("/user-cpu", (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/system-cpu", (req, res) => {
-  for (let i = 0; i < 10; i++) {
+app.get("/system-cpu", async (req, res) => {
+  for (let i = 0; i < 15; i++) {
     // use this command to generate the bigfile
     // dd if=/dev/urandom of=bigfile.dat bs=1M count=500
-    fs.readFileSync("./bigfile.dat");
+    await fs.readFile("./bigfile.dat");
   }
 
   res.json({
@@ -72,16 +111,15 @@ app.get("/system-cpu", (req, res) => {
   });
 });
 
-app.get('/cpu-usage', (req, res) => {
-  const { user, system } = process.cpuUsage()
+app.get("/cpu-usage", (req, res) => {
+  const { user, system } = process.cpuUsage();
   res.json({
     user: user / 1000,
     system: system / 1000,
     total: (user + system) / 1000,
-    uptime: performance.now()
-  })
-})
-
+    uptime: performance.now(),
+  });
+});
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
