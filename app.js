@@ -27,6 +27,7 @@ const httpReqDuration = new promClient.Histogram({
 promClient.collectDefaultMetrics();
 
 app.use((req, res, next) => {
+  console.log(req.path);
   if (req.path === "/metrics") return next();
   const { method, path } = req;
   httpReqInFlight.labels(method, path).inc();
